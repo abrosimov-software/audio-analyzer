@@ -2,6 +2,7 @@ from typing import Dict, List, Tuple, Union, Optional
 import os
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+import librosa
 
 class TranscriptionService:
     """
@@ -84,7 +85,28 @@ class TranscriptionService:
         Returns:
             List of dictionaries containing timestamp and text chunks
         """
-        
-        result = self.pipe(audio_path)
+        audio_data, sr = librosa.load(audio_path, sr=16000)
 
-        return result["chunks"]
+        input_features = self.processor(
+            audio_data,
+            sampling_rate=sr,
+            return_tensors="pt",
+            truncation=False
+        ).input_features
+
+        input_features = input_features.to(self.device, dtype=self.torch_dtype)
+
+        generated_ids = self.model.generate(
+            input_features, 
+            return_timestamps=True, 
+            return_segments=True
+        )
+
+        transcript = self.processor.batch_decode(
+            generated_ids["sequences"], 
+            skip_special_tokens=True, 
+            output_offsets=True
+        )
+
+        return transcript[0]["offsets"]
+            

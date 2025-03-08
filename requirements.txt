@@ -10,3 +10,4 @@ sglang
 pydub
 python-dotenv
 pytest
+librosa
