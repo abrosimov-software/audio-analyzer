@@ -11,3 +11,4 @@ pydub
 python-dotenv
 pytest
 librosa
+bertopic

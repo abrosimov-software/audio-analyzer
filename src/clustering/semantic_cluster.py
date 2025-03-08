@@ -1,256 +1,413 @@
-from typing import List, Dict, Any, Tuple, Optional, Union, Set
+from typing import List, Dict, Tuple, Any, Optional, Union
 import numpy as np
-from sentence_transformers import SentenceTransformer
-from sklearn.cluster import AgglomerativeClustering, DBSCAN
+import pandas as pd
+from bertopic import BERTopic
 import matplotlib.pyplot as plt
-from scipy.spatial.distance import cosine
+from scipy.signal import find_peaks
+from collections import Counter
 
 class SemanticCluster:
     """
-    Groups semantically related text chunks from transcripts into topic clusters.
+    Performs semantic clustering on transcript data to segment conversations by topic.
     
-    This class analyzes transcript segments to identify semantic boundaries where
-    conversation topics change, then groups similar segments together regardless
-    of their position in the timeline.
+    This class uses BERTopic to identify topics in text and then applies segmentation
+    algorithms to divide transcripts into coherent semantic sections.
     
     Attributes:
-        model: SentenceTransformer model for generating text embeddings
-        threshold: Similarity threshold for clustering (0-1)
-        min_chunk_length: Minimum text length to consider for clustering
-        clustering_algorithm: Algorithm to use for clustering ('agglomerative' or 'dbscan')
+        topic_model: The BERTopic model used for topic modeling
+        segment_threshold: Threshold for determining segment boundaries
+        min_segment_length: Minimum number of utterances in a segment
+        topics_data: DataFrame containing topic information after fitting
+        segments: List of detected segments after segmentation
     """
     
     def __init__(
         self, 
-        model_name: str = "all-mpnet-base-v2", 
-        threshold: float = 0.75,
-        min_chunk_length: int = 10,
-        clustering_algorithm: str = "agglomerative"
+        topic_model: Optional[BERTopic] = None,
+        segment_threshold: float = 0.5,
+        min_segment_length: int = 3
     ) -> None:
         """
         Initialize the semantic clustering service.
         
         Args:
-            model_name: Name of the sentence transformer model
-                Default is 'all-mpnet-base-v2' which offers better semantic understanding
-                than smaller models like MiniLM
-            threshold: Similarity threshold for clustering (0-1)
-                Higher values create more granular clusters
-            min_chunk_length: Minimum character length for chunks to be considered
-                Very short segments often lack sufficient context for accurate embedding
-            clustering_algorithm: Algorithm to use for clustering
-                'agglomerative' (default) or 'dbscan'
+            topic_model: Pre-initialized BERTopic model (creates a new one if None)
+            segment_threshold: Threshold for topic shift detection (0.0-1.0)
+            min_segment_length: Minimum number of utterances in a segment
         """
-        self.model = SentenceTransformer(model_name)
-        self.threshold = threshold
-        self.min_chunk_length = min_chunk_length
-        self.clustering_algorithm = clustering_algorithm
-    
-    def get_embeddings(self, texts: List[str]) -> np.ndarray:
-        """
-        Generate embeddings for the given texts.
+        self.topic_model = topic_model if topic_model else BERTopic(verbose=True)
+        self.segment_threshold = segment_threshold
+        self.min_segment_length = min_segment_length
+        self.topics_data = None
+        self.segments = []
         
-        Args:
-            texts: List of text strings to embed
-            
-        Returns:
-            Array of embeddings where each row corresponds to a text
-        """
-        return self.model.encode(texts, show_progress_bar=True)
-    
-    def cluster_chunks(
+    def fit_transform(
         self, 
-        chunks: List[Dict[str, Any]], 
-        distance_threshold: Optional[float] = None,
-        consider_speakers: bool = True,
-        min_cluster_size: int = 2
+        transcript: List[Dict[str, Any]]
     ) -> List[List[Dict[str, Any]]]:
         """
-        Group chunks into semantically related clusters.
+        Process transcript to identify topics and group utterances by topic.
         
         Args:
-            chunks: List of transcript chunks with at minimum:
-                - "text": The text content
-                - "timestamp": Tuple of (start_time, end_time)
-                - "speaker" (optional): Speaker identifier
-            distance_threshold: Optional custom threshold (0-1)
-                Override the default threshold set during initialization
-            consider_speakers: Whether to use speaker changes as potential topic boundaries
-                This can improve clustering when different speakers discuss different topics
-            min_cluster_size: Minimum number of chunks required to form a cluster
-                Helps prevent over-fragmentation
+            transcript: List of transcript utterances with text and timestamps
             
         Returns:
-            List of clusters, where each cluster is a list of chunks
+            List of lists, where each inner list contains utterances belonging to a topic
         """
-        if not chunks:
+        # Save the original transcript
+        self.transcript = transcript
+        
+        # Check if transcript is too short for meaningful segmentation
+        # Minimum threshold for running the full algorithm
+        MIN_UTTERANCES_FOR_SEGMENTATION = 10
+        
+        if len(transcript) < MIN_UTTERANCES_FOR_SEGMENTATION:
+            # For very short transcripts, create a single topic/segment
+            self._handle_short_transcript(transcript)
+            return self.get_topics_with_utterances()
+        
+        # Regular processing for normal-length transcripts
+        texts = [segment["text"] for segment in transcript]
+        timestamps = [segment["timestamp"][0] for segment in transcript]
+        
+        # Fit BERTopic model
+        topics, probs = self.topic_model.fit_transform(texts)
+        self.topics = topics
+        self.probs = probs
+        
+        # Get topics over time for visualization
+        # Ensure at least 1 bin
+        nr_bins = max(1, min(20, len(texts) // 5))
+        topics_over_time = self.topic_model.topics_over_time(
+            texts,
+            timestamps,
+            nr_bins=nr_bins
+        )
+        
+        self.topics_data = topics_over_time
+        
+        # Also create the traditional segments for visualization and analysis
+        self.segments = self._create_segments(transcript, topics)
+        
+        # Return the transcript items grouped by topic
+        return self.get_topics_with_utterances()
+    
+    def _handle_short_transcript(self, transcript: List[Dict[str, Any]]) -> None:
+        """
+        Handle very short transcripts by treating them as a single topic.
+        
+        Args:
+            transcript: Short transcript data
+        """
+        # Try to run BERTopic on the short transcript to get keywords
+        texts = [segment["text"] for segment in transcript]
+        
+        try:
+            # Attempt to get topic information
+            topics, probs = self.topic_model.fit_transform(texts)
+            self.topics = topics
+            
+            # If all utterances were assigned to topic -1 (outlier),
+            # reassign them to topic 0 for consistency
+            if all(t == -1 for t in topics):
+                self.topics = [0] * len(topics)
+            
+        except Exception as e:
+            # If topic modeling fails on short text, assign all to topic 0
+            self.topics = [0] * len(transcript)
+            print(f"Notice: Short transcript processed as single topic. {str(e)}")
+        
+        # Create a single segment for the entire transcript
+        start_time = transcript[0]["timestamp"][0]
+        end_time = transcript[-1]["timestamp"][1]
+        
+        # Try to get keywords if possible
+        try:
+            topic_id = 0
+            topic_info = self.topic_model.get_topic(topic_id)
+            topic_words = [word for word, _ in topic_info[:5]] if topic_info else []
+        except:
+            topic_id = 0
+            topic_words = []
+        
+        # Create a single segment
+        segment = {
+            "start_index": 0,
+            "end_index": len(transcript) - 1,
+            "start_time": start_time,
+            "end_time": end_time,
+            "duration": end_time - start_time,
+            "transcript": transcript,
+            "dominant_topic": topic_id,
+            "topic_keywords": topic_words,
+            "topic_distribution": {topic_id: len(transcript)}
+        }
+        
+        self.segments = [segment]
+        
+        # Also ensure _detect_topic_boundaries won't fail
+        self.min_segment_length = min(2, len(transcript))
+    
+    def _create_segments(
+        self, 
+        transcript: List[Dict[str, Any]], 
+        topics: List[int]
+    ) -> List[Dict[str, Any]]:
+        """
+        Create segments based on topic shifts.
+        
+        Args:
+            transcript: Original transcript data
+            topics: Topic assignments from BERTopic
+            
+        Returns:
+            List of segmented topics with metadata
+        """
+        # Find significant topic shifts using a sliding window approach
+        boundaries = self._detect_topic_boundaries(topics)
+        
+        # Create segments based on boundaries
+        segments = []
+        for i in range(len(boundaries) - 1):
+            start_idx = boundaries[i]
+            end_idx = boundaries[i+1] - 1  # -1 because the boundary is the start of the next segment
+            
+            segment_transcript = transcript[start_idx:end_idx+1]
+            segment_topics = topics[start_idx:end_idx+1]
+            
+            # Get the dominant topic in this segment
+            topic_counter = Counter(segment_topics)
+            dominant_topic = topic_counter.most_common(1)[0][0]
+            
+            # Skip outlier segments (topic -1)
+            if dominant_topic == -1 and len(topic_counter) > 1:
+                # Try to find the next most common topic that isn't -1
+                for topic, _ in topic_counter.most_common():
+                    if topic != -1:
+                        dominant_topic = topic
+                        break
+            
+            # Get topic info
+            topic_info = self.topic_model.get_topic(dominant_topic) if dominant_topic != -1 else []
+            topic_words = [word for word, _ in topic_info]
+            
+            # Calculate segment metadata
+            start_time = segment_transcript[0]["timestamp"][0]
+            end_time = segment_transcript[-1]["timestamp"][1]
+            
+            # Create segment object
+            segment = {
+                "start_index": start_idx,
+                "end_index": end_idx,
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration": end_time - start_time,
+                "transcript": segment_transcript,
+                "dominant_topic": dominant_topic,
+                "topic_keywords": topic_words[:5] if topic_words else [],
+                "topic_distribution": dict(topic_counter)
+            }
+            
+            segments.append(segment)
+        
+        return segments
+    
+    def _detect_topic_boundaries(self, topics: List[int]) -> List[int]:
+        """
+        Detect boundaries where topics shift significantly.
+        
+        Args:
+            topics: List of topic assignments
+        
+        Returns:
+            List of indices representing segment boundaries
+        """
+        # Handle very short transcripts
+        if len(topics) <= self.min_segment_length * 2:
+            return [0, len(topics)]
+        
+        # Always include the first utterance as a boundary
+        boundaries = [0]
+        
+        # Use a sliding window to detect significant topic shifts
+        # Ensure window size is appropriate for transcript length
+        window_size = min(5, max(3, len(topics) // 20))
+        
+        i = window_size
+        while i < len(topics) - window_size:
+            window_before = topics[i-window_size:i]
+            window_after = topics[i:i+window_size]
+            
+            # Count topic distributions in each window
+            before_counter = Counter(window_before)
+            after_counter = Counter(window_after)
+            
+            # Calculate the dominant topics for each window
+            dom_before = before_counter.most_common(1)[0][0] if before_counter else -1
+            dom_after = after_counter.most_common(1)[0][0] if after_counter else -1
+            
+            # Check if dominant topic changed
+            if dom_before != dom_after:
+                # Calculate how distinct the distributions are
+                topic_shift_score = self._calculate_topic_shift(before_counter, after_counter)
+                
+                if topic_shift_score > self.segment_threshold:
+                    # If the last boundary is too close, replace it
+                    if boundaries and i - boundaries[-1] < self.min_segment_length:
+                        boundaries[-1] = i
+                    else:
+                        boundaries.append(i)
+                    
+                    # Skip ahead to avoid detecting multiple boundaries in the same area
+                    i += window_size
+            
+            i += 1
+        
+        # Always include the last utterance as a boundary
+        if len(topics) - 1 not in boundaries:
+            boundaries.append(len(topics))
+        
+        return boundaries
+    
+    def _calculate_topic_shift(self, counter1: Counter, counter2: Counter) -> float:
+        """
+        Calculate a topic shift score between two topic distributions.
+        
+        Args:
+            counter1: Topic distribution before
+            counter2: Topic distribution after
+            
+        Returns:
+            A score from 0-1 indicating the degree of topic shift
+        """
+        # Get all unique topics
+        all_topics = set(counter1.keys()) | set(counter2.keys())
+        
+        # Convert to probability distributions
+        total1 = sum(counter1.values())
+        total2 = sum(counter2.values())
+        
+        # Calculate Jensen-Shannon divergence (simplified)
+        score = 0
+        for topic in all_topics:
+            p1 = counter1.get(topic, 0) / total1 if total1 else 0
+            p2 = counter2.get(topic, 0) / total2 if total2 else 0
+            
+            # Simple absolute difference
+            score += abs(p1 - p2)
+        
+        # Normalize
+        return min(1.0, score / 2.0)
+    
+    
+    def format_segmented_transcript(self) -> str:
+        """
+        Format the segmented transcript for display.
+        
+        Returns:
+            Formatted string with topic segments and associated transcript
+        """
+        if not self.segments:
+            return "No segments available. Run fit_transform first."
+        
+        result = []
+        
+        for i, segment in enumerate(self.segments):
+            topic_id = segment["dominant_topic"]
+            keywords = ", ".join(segment["topic_keywords"]) if segment["topic_keywords"] else "No specific keywords"
+            
+            # Add segment header
+            result.append(f"\n{'='*80}")
+            result.append(f"SEGMENT {i+1}: Topic {topic_id} - {keywords}")
+            result.append(f"Time: {segment['start_time']:.2f}s - {segment['end_time']:.2f}s (Duration: {segment['duration']:.2f}s)")
+            result.append(f"{'='*80}\n")
+            
+            # Add transcript for this segment
+            for utterance in segment["transcript"]:
+                speaker = utterance.get("speaker", "Unknown")
+                text = utterance["text"]
+                start, end = utterance["timestamp"]
+                result.append(f"{speaker} [{start:.2f}s - {end:.2f}s]: {text}")
+            
+            result.append("\n")
+        
+        return "\n".join(result)
+
+    def get_topics_with_utterances(self) -> List[List[Dict[str, Any]]]:
+        """
+        Group utterances by topic regardless of their position in the transcript.
+        
+        Returns:
+            A list of lists where:
+            - Each outer list represents a topic
+            - Each inner list contains all utterances (with timestamps and speakers)
+              that belong to that topic, in their original chronological order
+            
+        This format organizes utterances by semantic similarity rather than 
+        consecutive segments, allowing for non-contiguous topic discussions.
+        """
+        if not hasattr(self, 'topics') or not self.topics:
+            raise ValueError("No topics available. Run fit_transform first.")
+        
+        # Create a dictionary to group utterances by topic
+        topic_groups = {}
+        
+        # Iterate through the transcript and group by topic
+        for i, (utterance, topic) in enumerate(zip(self.transcript, self.topics)):
+            # Initialize the list for this topic if it doesn't exist
+            if topic not in topic_groups:
+                topic_groups[topic] = []
+            
+            # Add the utterance to the appropriate topic group
+            topic_groups[topic].append(utterance)
+        
+        # Convert the dictionary to a list of lists, sorted by topic ID
+        # (excluding -1 which is the outlier topic)
+        sorted_topics = sorted([t for t in topic_groups.keys() if t != -1])
+        if -1 in topic_groups:
+            sorted_topics.append(-1)  # Add outlier topic at the end if it exists
+        
+        topic_utterances = [topic_groups[topic] for topic in sorted_topics]
+        
+        return topic_utterances
+
+    def get_topic_info(self) -> List[Dict[str, Any]]:
+        """
+        Get information about each topic identified in the transcript.
+        
+        Returns:
+            List of dictionaries containing topic information
+        """
+        if not hasattr(self, 'topics') or not self.topics:
             return []
         
-        # Filter out chunks that are too short
-        valid_chunks = [c for c in chunks if len(c.get("text", "")) >= self.min_chunk_length]
+        # Get unique topics (excluding -1 which is the outlier topic)
+        unique_topics = sorted(set([t for t in self.topics if t != -1]))
+        if -1 in self.topics:
+            unique_topics.append(-1)  # Add outlier topic at the end if it exists
         
-        # Extract text for embedding
-        texts = [chunk["text"] for chunk in valid_chunks]
-        
-        # Generate embeddings
-        embeddings = self.get_embeddings(texts)
-        
-        # Factor in speaker changes if requested
-        if consider_speakers and all("speaker" in chunk for chunk in valid_chunks):
-            # Enhance embeddings with speaker information
-            embeddings = self._consider_speaker_changes(embeddings, valid_chunks)
-        
-        # Perform clustering
-        threshold = distance_threshold or self.threshold
-        if self.clustering_algorithm == "dbscan":
-            clustering = DBSCAN(
-                eps=1.0 - threshold,  # Convert similarity to distance
-                min_samples=min_cluster_size,
-                metric="cosine"
-            ).fit(embeddings)
-        else:  # Default to agglomerative
-            clustering = AgglomerativeClustering(
-                n_clusters=None,
-                distance_threshold=1.0 - threshold,  # Convert similarity to distance
-                metric="cosine",
-                linkage="average"
-            ).fit(embeddings)
-        
-        # Group chunks by cluster
-        cluster_ids = clustering.labels_
-        clustered_chunks: Dict[int, List[Dict[str, Any]]] = {}
-        
-        for i, cluster_id in enumerate(cluster_ids):
-            # Skip noise points (cluster_id = -1 in DBSCAN)
-            if cluster_id == -1:
-                continue
-                
-            if cluster_id not in clustered_chunks:
-                clustered_chunks[cluster_id] = []
-            clustered_chunks[cluster_id].append(valid_chunks[i])
-        
-        # Sort chunks within each cluster by timestamp
-        result = list(clustered_chunks.values())
-        for cluster in result:
-            cluster.sort(key=lambda x: x["timestamp"][0])
+        topic_info = []
+        for topic in unique_topics:
+            # Get keywords for this topic
+            keywords = []
+            if topic != -1:
+                topic_words = self.topic_model.get_topic(topic)
+                keywords = [word for word, _ in topic_words[:5]]
             
-        # Sort clusters themselves by first timestamp
-        result.sort(key=lambda x: x[0]["timestamp"][0] if x else float('inf'))
-        
-        return result
-    
-    def _consider_speaker_changes(
-        self, 
-        embeddings: np.ndarray, 
-        chunks: List[Dict[str, Any]],
-        speaker_change_weight: float = 0.1
-    ) -> np.ndarray:
-        """
-        Adjust embeddings to account for speaker changes.
-        
-        Args:
-            embeddings: Original text embeddings
-            chunks: Transcript chunks with speaker information
-            speaker_change_weight: Weight given to speaker changes (0-1)
-                Higher values make speaker changes more significant in clustering
-                
-        Returns:
-            Modified embeddings that factor in speaker changes
-        """
-        # Create a copy to avoid modifying the original
-        modified_embeddings = embeddings.copy()
-        
-        # Add a small distance between chunks when speakers change
-        for i in range(1, len(chunks)):
-            if chunks[i].get("speaker") != chunks[i-1].get("speaker"):
-                # Slightly shift the embedding to increase distance
-                shift_vector = np.random.normal(0, speaker_change_weight, size=embeddings.shape[1])
-                modified_embeddings[i] = modified_embeddings[i] + shift_vector
-                # Renormalize to unit length
-                modified_embeddings[i] = modified_embeddings[i] / np.linalg.norm(modified_embeddings[i])
-                
-        return modified_embeddings
-    
-    def visualize_clusters(
-        self, 
-        chunks: List[Dict[str, Any]], 
-        clusters: List[List[Dict[str, Any]]]
-    ) -> plt.Figure:
-        """
-        Visualize the clustering of transcript chunks.
-        
-        Creates a timeline visualization showing how chunks are clustered,
-        with each cluster represented by a different color.
-        
-        Args:
-            chunks: Original list of transcript chunks
-            clusters: Clustered chunks as returned by cluster_chunks
+            # Count utterances for this topic
+            count = sum(1 for t in self.topics if t == topic)
             
-        Returns:
-            Matplotlib figure object containing the visualization
-        """
-        fig, ax = plt.subplots(figsize=(15, 5))
+            # Get timestamps for first and last occurrence
+            topic_indices = [i for i, t in enumerate(self.topics) if t == topic]
+            first_timestamp = self.transcript[topic_indices[0]]["timestamp"][0] if topic_indices else 0
+            last_timestamp = self.transcript[topic_indices[-1]]["timestamp"][1] if topic_indices else 0
+            
+            topic_info.append({
+                "topic_id": topic,
+                "keywords": keywords,
+                "utterance_count": count,
+                "first_occurrence": first_timestamp,
+                "last_occurrence": last_timestamp
+            })
         
-        # Create a mapping of chunks to cluster IDs
-        chunk_to_cluster: Dict[Tuple[float, float], int] = {}
-        for cluster_id, cluster in enumerate(clusters):
-            for chunk in cluster:
-                # Use timestamp as a unique identifier
-                chunk_to_cluster[chunk["timestamp"]] = cluster_id
-        
-        # Plot each chunk as a bar on the timeline
-        for i, chunk in enumerate(chunks):
-            timestamp = chunk["timestamp"]
-            start_time, end_time = timestamp
-            duration = end_time - start_time
-            
-            # Get cluster ID or -1 if not clustered
-            cluster_id = chunk_to_cluster.get(timestamp, -1)
-            
-            # Set color based on cluster ID
-            color = f'C{cluster_id % 10}' if cluster_id >= 0 else 'gray'
-            
-            # Plot the chunk
-            ax.barh(0, duration, left=start_time, height=0.5, color=color, alpha=0.7)
-            
-        # Set up the plot
-        ax.set_yticks([])
-        ax.set_xlabel('Time (seconds)')
-        ax.set_title('Transcript Clusters Over Time')
-        
-        return fig
-    
-    def get_cluster_topics(
-        self, 
-        clusters: List[List[Dict[str, Any]]],
-        num_keywords: int = 5
-    ) -> List[str]:
-        """
-        Extract representative keywords or topics for each cluster.
-        
-        This is a simple keyword extraction implementation. For more advanced
-        topic modeling, consider using additional NLP libraries.
-        
-        Args:
-            clusters: Clustered chunks as returned by cluster_chunks
-            num_keywords: Number of keywords to extract per cluster
-            
-        Returns:
-            List of topic descriptions, one per cluster
-        """
-        # This is a placeholder - in a full implementation, you would use
-        # more sophisticated topic modeling or keyword extraction
-        topics = []
-        
-        for cluster in clusters:
-            # Combine all text in the cluster
-            all_text = " ".join([chunk["text"] for chunk in cluster])
-            
-            # For now, just take the first few words as the "topic"
-            # In a real implementation, use proper keyword extraction
-            words = all_text.split()[:num_keywords]
-            topic = " ".join(words) + "..."
-            
-            topics.append(topic)
-            
-        return topics
+        return topic_info
