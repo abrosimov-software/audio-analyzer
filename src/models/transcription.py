@@ -1,4 +1,5 @@
 from typing import Dict, List, Tuple, Union, Optional
+import os
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
@@ -11,15 +12,22 @@ class TranscriptionService:
         processor: The text processor for the model
         device: The compute device (cuda, mps, or cpu)
         torch_dtype: The tensor data type
+        hf_token: The Hugging Face token
     """
     
-    def __init__(self, model_id: str = "openai/whisper-large-v3-turbo", device: Optional[str] = None) -> None:
+    def __init__(
+            self, 
+            model_id: str = "openai/whisper-large-v3-turbo", 
+            device: Optional[str] = None, 
+            hf_token: Optional[str] = None
+        ) -> None:
         """
         Initialize the transcription service with the specified model.
         
         Args:
             model_id: The Hugging Face model ID for the Whisper model
             device: Computing device, if None will be auto-selected
+            hf_token: The Hugging Face token
         """
         # Setup device
         if device is None:
@@ -28,16 +36,20 @@ class TranscriptionService:
             self.device = device
             
         self.torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        
+
+        # Get token from parameter or environment
+        self.hf_token = hf_token or os.environ.get("HF_TOKEN")
+
         # Load model and processor
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id, 
             torch_dtype=self.torch_dtype, 
             low_cpu_mem_usage=True, 
-            use_safetensors=True
+            use_safetensors=True,
+            use_auth_token=self.hf_token
         )
         self.model.to(self.device)
-        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.processor = AutoProcessor.from_pretrained(model_id, use_auth_token=self.hf_token)
 
         self.pipe = pipeline(
             "automatic-speech-recognition",
@@ -72,5 +84,7 @@ class TranscriptionService:
         Returns:
             List of dictionaries containing timestamp and text chunks
         """
+        
         result = self.pipe(audio_path)
+
         return result["chunks"]

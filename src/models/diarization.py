@@ -93,29 +93,61 @@ class SpeakerDiarizationService:
         
         return temp_audio_path, True
         
-    def diarize(self, media_path: str) -> List[Dict[str, Any]]:
+    def diarize(
+        self, 
+        media_path: str,
+        fast_mode: bool = False,
+        use_chunking: bool = True,
+        chunk_duration: float = 300.0
+    ) -> List[Dict[str, Any]]:
         """
-        Identify speakers in the audio or video file.
-        
-        Automatically detects if the file is a video and extracts the audio
-        track for processing if needed.
+        Identify speakers in the audio or video file with performance optimizations.
         
         Args:
             media_path: Path to the audio or video file
+            fast_mode: If True, prioritize speed over accuracy
+            use_chunking: Whether to process long files in chunks
+            chunk_duration: Duration of each chunk in seconds (if chunking)
             
         Returns:
             List of segments with speaker information
         """
-        temp_file_created = False
+        
+        # For longer files, use chunking approach
+        if use_chunking:
+            # Estimate audio duration
+            try:
+                audio = AudioSegment.from_file(media_path)
+                duration = len(audio) / 1000.0  # in seconds
+                
+                # If audio is longer than chunk_duration, use chunked processing
+                if duration > chunk_duration:
+                    return self.diarize_with_chunking(
+                        media_path, 
+                        chunk_duration=chunk_duration,
+                        overlap_duration=min(15.0, chunk_duration * 0.05)  # 5% overlap
+                    )
+            except:
+                pass
+        
+        # Standard processing for shorter files
+        temp_files = []
         audio_path = media_path
         
         try:
             # Check if input is a video file
             if self.is_video_file(media_path):
-                audio_path, temp_file_created = self.extract_audio_from_video(media_path)
+                audio_path, is_temp = self.extract_audio_from_video(media_path)
+                if is_temp:
+                    temp_files.append(audio_path)
             
-            # Run diarization on audio
-            diarization = self.pipeline(audio_path)
+            # Preprocess audio for faster processing
+            processed_path, is_temp = self.preprocess_audio(audio_path)
+            if is_temp:
+                temp_files.append(processed_path)
+            
+            # Run diarization on processed audio
+            diarization = self.pipeline(processed_path)
             
             # Format output
             segments = []
@@ -129,7 +161,157 @@ class SpeakerDiarizationService:
             return segments
             
         finally:
+            # Clean up all temporary files
+            for temp_file in temp_files:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+    
+    def diarize_with_chunking(
+        self, 
+        media_path: str, 
+        chunk_duration: float = 300.0,  # 5 minutes per chunk
+        overlap_duration: float = 15.0  # 15 seconds overlap
+    ) -> List[Dict[str, Any]]:
+        """
+        Process long audio files by breaking them into overlapping chunks.
+        
+        Args:
+            media_path: Path to the audio or video file
+            chunk_duration: Duration of each chunk in seconds
+            overlap_duration: Overlap between chunks in seconds
+            
+        Returns:
+            List of segments with speaker information
+        """
+        temp_file_created = False
+        audio_path = media_path
+        
+        try:
+            # Extract audio if input is a video file
+            if self.is_video_file(media_path):
+                audio_path, temp_file_created = self.extract_audio_from_video(media_path)
+            
+            # Get audio duration
+            audio = AudioSegment.from_file(audio_path)
+            total_duration = len(audio) / 1000.0  # Convert to seconds
+            
+            # Process in chunks
+            all_segments = []
+            speaker_mapping = {}  # To maintain consistent speaker IDs across chunks
+            next_speaker_id = 0
+            
+            for start_time in range(0, int(total_duration), int(chunk_duration - overlap_duration)):
+                # Define chunk boundaries
+                chunk_start = max(0, start_time)
+                chunk_end = min(total_duration, start_time + chunk_duration)
+                
+                # Skip if we've reached the end
+                if chunk_start >= total_duration:
+                    break
+                
+                # Extract chunk
+                chunk = audio[int(chunk_start * 1000):int(chunk_end * 1000)]
+                
+                # Save chunk to temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_chunk:
+                    chunk_path = temp_chunk.name
+                    chunk.export(chunk_path, format="wav")
+                
+                try:
+                    # Process chunk
+                    diarization = self.pipeline(chunk_path)
+                    
+                    # Adjust timestamps and map speakers
+                    chunk_segments = []
+                    for turn, _, speaker in diarization.itertracks(yield_label=True):
+                        # Adjust timestamps relative to original audio
+                        adjusted_start = chunk_start + turn.start
+                        adjusted_end = chunk_start + turn.end
+                        
+                        # Skip segments in overlap region (will be processed in next chunk)
+                        # except for the last chunk
+                        if (adjusted_start >= chunk_end - overlap_duration and 
+                            chunk_end < total_duration):
+                            continue
+                        
+                        # Map speaker IDs to be consistent across chunks
+                        if speaker not in speaker_mapping:
+                            speaker_mapping[speaker] = f"SPEAKER_{next_speaker_id:02d}"
+                            next_speaker_id += 1
+                        
+                        chunk_segments.append({
+                            "start": adjusted_start,
+                            "end": adjusted_end,
+                            "speaker": speaker_mapping[speaker]
+                        })
+                    
+                    all_segments.extend(chunk_segments)
+                finally:
+                    # Clean up temporary chunk file
+                    if os.path.exists(chunk_path):
+                        os.unlink(chunk_path)
+            
+            # Sort segments by start time
+            all_segments.sort(key=lambda x: x["start"])
+            
+            # Merge adjacent segments with same speaker
+            merged_segments = []
+            if all_segments:
+                current = all_segments[0]
+                for segment in all_segments[1:]:
+                    # If same speaker and close enough, merge
+                    if (segment["speaker"] == current["speaker"] and 
+                        segment["start"] - current["end"] < 0.5):  # 500ms threshold
+                        current["end"] = segment["end"]
+                    else:
+                        merged_segments.append(current)
+                        current = segment
+                
+                merged_segments.append(current)
+            
+            return merged_segments
+            
+        finally:
             # Clean up temporary file if created
             if temp_file_created and os.path.exists(audio_path):
                 os.unlink(audio_path)
-    
+
+
+    def preprocess_audio(
+        self, 
+        audio_path: str, 
+        sample_rate: int = 16000,
+        channels: int = 1
+    ) -> Tuple[str, bool]:
+        """
+        Preprocess audio for faster diarization by downsampling.
+        
+        Args:
+            audio_path: Path to the audio file
+            sample_rate: Target sample rate in Hz
+            channels: Number of audio channels (1 for mono)
+            
+        Returns:
+            Tuple containing path to processed audio file and a flag indicating
+            if the file is temporary and should be deleted after use
+        """
+        # Create temporary file for processed audio
+        temp_audio_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        temp_audio_path = temp_audio_file.name
+        temp_audio_file.close()
+        
+        # Load and resample audio using pydub
+        audio = AudioSegment.from_file(audio_path)
+        
+        # Convert to mono if needed
+        if audio.channels > 1 and channels == 1:
+            audio = audio.set_channels(1)
+        
+        # Downsample if needed
+        if audio.frame_rate > sample_rate:
+            audio = audio.set_frame_rate(sample_rate)
+        
+        # Export processed audio
+        audio.export(temp_audio_path, format="wav")
+        
+        return temp_audio_path, True
