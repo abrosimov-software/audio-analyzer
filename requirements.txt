@@ -2,3 +2,11 @@ transformers
 accelerate
 datasets
 jupyter
+streamlit
+pyannote.audio
+sentence-transformers
+scikit-learn
+sglang
+pydub
+python-dotenv
+pytest
