@@ -2,6 +2,9 @@
 
 A comprehensive toolset for processing, analyzing, and extracting insights from audio conversations.
 
+## More about the project
+https://github.com/abrosimov-software/audio-analyzer/blob/dev/docs/about_project.md
+
 ## Features
 
 - **Transcription**: Convert audio to text with timestamps using Whisper models
