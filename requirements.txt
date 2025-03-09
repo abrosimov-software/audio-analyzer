@@ -1,4 +1,4 @@
-transformers
+transformers<=4.48.3
 accelerate
 datasets
 jupyter
@@ -6,9 +6,9 @@ streamlit
 pyannote.audio
 sentence-transformers
 scikit-learn
-sglang
 pydub
 python-dotenv
 pytest
 librosa
 bertopic
+ollama

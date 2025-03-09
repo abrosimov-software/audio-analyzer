@@ -92,3 +92,59 @@ class TranscriptProcessor:
                 formatted_lines.append(f"{speaker}: {text}")
                 
         return "\n".join(formatted_lines)
+
+    @staticmethod
+    def format_transcript_by_topic(
+        topic_utterances: List[List[Dict[str, Any]]],
+    ) -> List[str]:
+        """
+        Format a transcript grouped by topics into readable strings.
+        
+        Takes the output from SemanticCluster.get_topics_with_utterances() and formats
+        each topic's utterances into a single formatted string.
+        
+        Args:
+            topic_utterances: List of lists, where each inner list contains utterances for a topic
+            
+        Returns:
+            List of strings, each containing the formatted transcript for one topic
+        """
+        formatted_topics = []
+        
+        for topic_index, utterances in enumerate(topic_utterances):
+            topic_lines = []
+            
+            for utterance in utterances:
+                speaker = utterance.get("speaker", "Unknown")
+                text = utterance.get("text", "").strip()
+                start_time, end_time = utterance.get("timestamp", (0.0, 0.0))
+                
+                start_formatted = TranscriptProcessor._seconds_to_hhmmss(start_time)
+                end_formatted = TranscriptProcessor._seconds_to_hhmmss(end_time)
+                time_str = f"[{start_formatted}-{end_formatted}]"
+                
+                # Add formatted line
+                topic_lines.append(f"{speaker} {time_str}: {text}")
+            
+            # Join all lines for this topic into a single string
+            topic_text = "\n".join(topic_lines)
+            formatted_topics.append(topic_text)
+        
+        return formatted_topics
+
+    @staticmethod
+    def _seconds_to_hhmmss(seconds: float) -> str:
+        """
+        Convert seconds to HH:MM:SS format.
+        
+        Args:
+            seconds: Time in seconds
+            
+        Returns:
+            Formatted time string in HH:MM:SS format
+        """
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        seconds = seconds % 60
+        
+        return f"{hours:02d}:{minutes:02d}:{seconds:05.2f}"
