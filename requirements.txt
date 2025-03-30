@@ -12,3 +12,5 @@ pytest
 librosa
 bertopic
 ollama
+streamlit
+watchdog
