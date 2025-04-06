@@ -48,6 +48,7 @@ class SpeakerDiarizationService:
         
         # Get token from parameter or environment
         self.hf_token = hf_token or os.environ.get("HF_TOKEN")
+        print(self.hf_token)
 
         # Initialize pipeline
         self.pipeline = Pipeline.from_pretrained(

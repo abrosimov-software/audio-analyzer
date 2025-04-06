@@ -2,14 +2,6 @@ import sys
 import asyncio
 import os
 
-# Настройки для MacOS
-if sys.platform == "darwin":
-    if sys.version_info >= (3, 8):
-        asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-    os.environ['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
-
-# Настройки Torch
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
 import torch
 from pathlib import Path
@@ -57,6 +49,8 @@ def main():
 
         if file_type == "video":
             st.video(uploaded_file)
+            print(type(uploaded_file))
+            print("\n\n\n\n")
             result = pipeline(uploaded_file)
             st.write("Analysis Result:", result)
         elif file_type == "audio":

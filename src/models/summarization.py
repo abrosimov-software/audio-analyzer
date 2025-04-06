@@ -35,8 +35,8 @@ class SummarizationService:
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.ollama_host = ollama_host or os.environ.get("OLLAMA_HOST", "http://host.docker.internal:11434")
-        
+        self.ollama_host = ollama_host or os.environ.get("OLLAMA_HOST")#, "http://host.docker.internal:11434")
+        print(self.ollama_host)
         self.client = ollama.Client(host=self.ollama_host)
 
     def summarize_topic(
