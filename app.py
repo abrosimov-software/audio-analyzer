@@ -49,12 +49,12 @@ def main():
 
         if file_type == "video":
             st.video(uploaded_file)
-            print(type(uploaded_file))
-            print("\n\n\n\n")
             result = pipeline(uploaded_file)
             st.write("Analysis Result:", result)
         elif file_type == "audio":
             st.audio(uploaded_file)
+            result = pipeline(uploaded_file)
+            st.write("Analysis Result:", result)
         else:
             st.error("Unsupported file type")
 
